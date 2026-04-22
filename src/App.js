@@ -6,6 +6,9 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState("Home");
   const [brailleDots, setBrailleDots] = useState([false, false, false, false, false, false]);
+  const [notes,setNotes]=useState([]);
+  const [editingId, setEditingId]= useState(null);
+  const [editText, setEditText] = useState("");
 
   const [fingers, setFingers] = useState({
     left: { thumb: false, middle: false, ring: false },
@@ -20,7 +23,8 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const settingsContainerRef = useRef(null);
 
-  useEffect(() => {
+  useEffect(() => 
+  {
     const ws = new WebSocket("ws://localhost:5001");
 
     ws.addEventListener("message", (evt) => {
@@ -43,6 +47,16 @@ function App() {
     };
   }, []);
 
+  //for notes to get saved
+  useEffect(() => 
+  {
+      const saved = localStorage.getItem("notes");
+      if (saved) 
+      {
+          setNotes(JSON.parse(saved));
+      }
+  },[]);
+
   // close settings dropdown when clicking outside the topbar-right area
   useEffect(() => {
     function onDocClick(e) {
@@ -56,18 +70,20 @@ function App() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
-  const navItems = useMemo(
+  const navItems = useMemo( //side bar options
     () => [
       { label: "Home", icon: <HomeIcon /> },
       { label: "Learn", icon: <LearnIcon /> },
       { label: "History", icon: <HistoryIcon /> },
       { label: "Sensor Data", icon: <SensorIcon /> },
       { label: "About", icon: <InfoIcon /> },
+      { label: "Notes"},//idk where my notebook symbol got saved
     ],
     []
   );
 
-  const resetVisuals = () => {
+  const resetVisuals = () => 
+  {
     setBrailleDots([false, false, false, false, false, false]);
     setFingers({
       left: { thumb: false, middle: false, ring: false },
@@ -76,7 +92,8 @@ function App() {
   };
 
   // temporary testing buttons
-  const testA = () => {
+  const testA = () =>
+  {
     setText((prev) => prev + "A");
     setBrailleDots([true, false, false, false, false, false]);
     setFingers({
@@ -85,7 +102,8 @@ function App() {
     });
   };
 
-  const testB = () => {
+  const testB = () => 
+  {
     setText((prev) => prev + "B");
     setBrailleDots([true, false, true, false, false, false]);
     setFingers({
@@ -225,6 +243,23 @@ function App() {
                     <VolumeIcon />
                     <span>Play Audio</span>
                   </button>
+                  
+
+                  <button className="action-button" //button to save
+                  onClick={() => {
+                     if (!text.trim()) return;
+                     const newNote = {
+                         id: Date.now(),
+                         text: text
+                     };
+                  setNotes((prev) => [...prev,{id:Date.now(),text:text}]);
+                      setText("");
+                      resetVisuals();
+                  }}
+                  
+                  > 
+                  Save note
+                  </button> 
 
                   <button
                     className="action-button"
@@ -330,6 +365,42 @@ function App() {
                 <p>Information about the app.</p>
               </div>
             )}
+
+            {activeTab === "Notes" && (  //where notes will be saved
+              <div className="tab-view">
+                <h2>Notes</h2>
+                {notes.length ===0? (
+                    <p> No notes saved yet. </p>
+                ) : (
+                    <ul>
+                    {notes.map((note,i) => (
+                        <li key={note.id}>
+                        
+                       <span> {note.text} </span>
+                        <button 
+                            onClick={() => {
+                                setNotes((prev) => prev.filter (n => n.id !== note.id));
+                            }}
+                            >
+                            Delete 
+                            </button>
+
+                        <button 
+                            onClick={() => {
+                                setEditingId(note.id);
+                                setEditText(note.text);
+                            }}
+                        > 
+                        Edit
+                        </button>
+                        </li>
+                    ))}
+                    </ul>
+                )}
+                
+              </div>
+            )}
+            
           </main>
         </div>
       </div>
