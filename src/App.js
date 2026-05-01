@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import "./App.css";
+import TypingGame from "./TypingGame";
 
 /* ─── BRAILLE DATA ────────────────────────────────────────── */
 const LETTER_PATTERNS = {
