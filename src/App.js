@@ -74,6 +74,22 @@ export default function App() {
   const [showAdvanced,       setShowAdvanced]       = useState(false);
   const HISTORY_LEN = 60;
 
+  // ── WEBSOCKET REFS ────────────────────────────────────────
+  const wsRef        = useRef(null); // Holds the live WebSocket instance
+  const reconnectRef = useRef(null); // Holds the setTimeout handle for reconnect
+
+  // ── DEDUP REF ─────────────────────────────────────────────
+  // Tracks the last letter received and when, to drop duplicates.
+  // WHY: React 18 StrictMode runs every useEffect TWICE in development
+  // (mount → fake unmount → mount again). connect() runs twice → two
+  // WebSocket objects open at the same time. Both receive the server
+  // broadcast, so onmessage fires twice → same letter appended twice.
+  // A ref is used instead of state because refs persist across re-renders
+  // without causing re-renders, and we need to write to it synchronously
+  // inside onmessage before the next message could arrive.
+  const lastMsgRef = useRef({ letter: "", time: 0 });
+  const DEDUP_MS   = 500; // Drop duplicate letters arriving within this window (ms)
+
   /* ─ nav ─ */
   const navItems = useMemo(() => [
     { label:"Home",        icon:<HomeIcon /> },
@@ -95,11 +111,11 @@ export default function App() {
     setHistory(load("braille-history", { notes:[], practice:[], sessions:[] }));
   }, []);
 
-  useEffect(() => { localStorage.setItem("braille-notes", JSON.stringify(notes)); }, [notes]);
-  useEffect(() => { localStorage.setItem("braille-deleted-notes", JSON.stringify(deletedNotes)); }, [deletedNotes]);
-  useEffect(() => { localStorage.setItem("braille-settings", JSON.stringify(settings)); }, [settings]);
-  useEffect(() => { localStorage.setItem("braille-learn-progress", JSON.stringify({ completedLetters })); }, [completedLetters]);
-  useEffect(() => { localStorage.setItem("braille-history", JSON.stringify(history)); }, [history]);
+  useEffect(() => { localStorage.setItem("braille-notes",         JSON.stringify(notes));            }, [notes]);
+  useEffect(() => { localStorage.setItem("braille-deleted-notes", JSON.stringify(deletedNotes));     }, [deletedNotes]);
+  useEffect(() => { localStorage.setItem("braille-settings",      JSON.stringify(settings));         }, [settings]);
+  useEffect(() => { localStorage.setItem("braille-learn-progress",JSON.stringify({ completedLetters })); }, [completedLetters]);
+  useEffect(() => { localStorage.setItem("braille-history",       JSON.stringify(history));          }, [history]);
 
   /* ─── outside click for settings ────────────────────────── */
   useEffect(() => {
@@ -114,46 +130,68 @@ export default function App() {
     speakText(lastSpokenMessage, settings.audioSpeed);
   }, [lastSpokenMessage, settings.audioEnabled, settings.audioSpeed, settings.spokenConfirmations]);
 
-  /* ─── WebSocket ──────────────────────────────────────────── */
+  /* ─── WebSocket — auto-connects, auto-reconnects, dedup ─── */
+  // learnRef keeps the latest state values accessible inside the WS
+  // callback closure without the effect needing to re-run on every change.
   const learnRef = useRef({ learnMode, targetLetter, completedLetters, activeTab, settings });
-  useEffect(() => { learnRef.current = { learnMode, targetLetter, completedLetters, activeTab, settings }; },
-    [learnMode, targetLetter, completedLetters, activeTab, settings]);
+  useEffect(() => {
+    learnRef.current = { learnMode, targetLetter, completedLetters, activeTab, settings };
+  }, [learnMode, targetLetter, completedLetters, activeTab, settings]);
 
   useEffect(() => {
-    let ws;
-    const pingInterval = { id: null };
-    const pingTimes = {};
-    let pingCounter = 0;
+    const pingTimes   = {};
+    let   pingCounter = 0;
+    let   pingId      = null;
 
-    try {
-      ws = new WebSocket("ws://localhost:5001");
+    const connect = () => {
+      // ── Open connection to the Node.js bridge server on the LAN ──
+      const ws = new WebSocket(`ws://${window.location.hostname}:5001`);
+      wsRef.current = ws;
 
-      ws.addEventListener("open", () => {
+      ws.onopen = () => {
         setConnected(true);
-        // start pinging for latency
-        pingInterval.id = setInterval(() => {
+        // Identify this client as a frontend (server logs it)
+        ws.send(JSON.stringify({ client: "frontend" }));
+
+        // Start latency pings every 2 s
+        pingId = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             const id = ++pingCounter;
             pingTimes[id] = performance.now();
             ws.send(JSON.stringify({ type: "ping", id }));
           }
         }, 2000);
-      });
+      };
 
-      ws.addEventListener("message", (event) => {
+      ws.onclose = () => {
+        setConnected(false);
+        clearInterval(pingId);
+        // Schedule reconnect — prevents connection dropping silently
+        reconnectRef.current = setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        // On any error, close triggers onclose which schedules reconnect
+        ws.close();
+      };
+
+      ws.onmessage = (evt) => {
         try {
-          const data = JSON.parse(event.data);
+          const data = JSON.parse(evt.data);
 
+          // ── Latency pong ──
           if (data.type === "pong" && pingTimes[data.id]) {
             setWsLatency(Math.round(performance.now() - pingTimes[data.id]));
             delete pingTimes[data.id];
             return;
           }
 
+          // ── Connection status message ──
           if (data.type === "status") { setConnected(!!data.connected); return; }
 
+          // ── Live sensor readings ──
           if (data.type === "sensor" && Array.isArray(data.values)) {
-            const vals = data.values.slice(0, 6);
+            const vals    = data.values.slice(0, 6);
             const adcVals = data.adc || vals.map(v => Math.round(v * 40.95));
             setSensorValues(vals);
             setSensorAdcValues(adcVals);
@@ -165,23 +203,69 @@ export default function App() {
             return;
           }
 
+          // ── Incoming letter ──
           if (data.type === "letter" && data.letter) {
-            handleIncomingLetter(String(data.letter).toUpperCase()); return;
+            const letter = String(data.letter).toUpperCase();
+            const now    = Date.now();
+
+            // DEDUP: drop if the same letter arrives within DEDUP_MS.
+            // This neutralises React StrictMode double-mount, multiple open
+            // tabs, and any duplicate that slips past the server-side dedup.
+            if (
+              letter === lastMsgRef.current.letter &&
+              now - lastMsgRef.current.time < DEDUP_MS
+            ) {
+              console.log("⚠️ Duplicate letter dropped:", letter);
+              return;
+            }
+            // Update dedup ref BEFORE setState to prevent race conditions
+            lastMsgRef.current = { letter, time: now };
+
+            handleIncomingLetter(letter);
+            return;
           }
 
+          // ── Legacy gesture message type ──
+          if (data.type === "gesture" && data.letter) {
+            const letter = String(data.letter).toUpperCase();
+            const now    = Date.now();
+
+            if (
+              letter === lastMsgRef.current.letter &&
+              now - lastMsgRef.current.time < DEDUP_MS
+            ) {
+              console.log("⚠️ Duplicate letter dropped:", letter);
+              return;
+            }
+            lastMsgRef.current = { letter, time: now };
+
+            handleIncomingLetter(letter);
+            return;
+          }
+
+          // ── Incoming raw pattern ──
           if (data.type === "pattern" && Array.isArray(data.pattern) && data.pattern.length === 6) {
-            handleIncomingPattern(data.pattern); return;
+            handleIncomingPattern(data.pattern);
+            return;
           }
-        } catch (err) { console.error("Bad ws message:", err); }
-      });
 
-      ws.addEventListener("close", () => { setConnected(false); clearInterval(pingInterval.id); });
-      ws.addEventListener("error", () => { setConnected(false); clearInterval(pingInterval.id); });
-    } catch { setConnected(false); }
+        } catch (err) {
+          console.error("Bad WS message:", err, evt.data);
+        }
+      };
+    };
 
-    return () => { clearInterval(pingInterval.id); if (ws) try { ws.close(); } catch {} };
+    connect(); // Initial connection on mount
+
+    // Cleanup: cancel reconnect timer and close socket on unmount
+    // (also runs on StrictMode fake-unmount)
+    return () => {
+      clearTimeout(reconnectRef.current);
+      clearInterval(pingId);
+      wsRef.current?.close();
+    };
   // eslint-disable-next-line
-  }, []);
+  }, []); // Empty deps — runs once on mount (twice in StrictMode dev)
 
   /* ─── helpers ────────────────────────────────────────────── */
   const { darkMode, textSize, audioEnabled, audioSpeed } = settings;
@@ -189,10 +273,10 @@ export default function App() {
   const filteredNotes = useMemo(() => {
     let r = [...notes];
     if (noteSearch) r = r.filter(n => n.text.toLowerCase().includes(noteSearch.toLowerCase()));
-    if (noteSort === "oldest")   r.sort((a,b) => a.id - b.id);
+    if (noteSort === "oldest")        r.sort((a,b) => a.id - b.id);
     else if (noteSort === "longest")  r.sort((a,b) => b.text.length - a.text.length);
     else if (noteSort === "shortest") r.sort((a,b) => a.text.length - b.text.length);
-    else r.sort((a,b) => b.id - a.id);
+    else                              r.sort((a,b) => b.id - a.id);
     return r;
   }, [notes, noteSearch, noteSort]);
 
@@ -270,7 +354,8 @@ export default function App() {
           ...p,
           practice: [{ type: ok?"correct":"incorrect", letter, target:targetLetter, createdAt:new Date().toLocaleString() }, ...p.practice].slice(0, 100),
         }));
-        if (settings.spokenConfirmations && settings.audioEnabled) setLastSpokenMessage(ok ? `Correct. ${letter}` : `Incorrect. You entered ${letter}`);
+        if (settings.spokenConfirmations && settings.audioEnabled)
+          setLastSpokenMessage(ok ? `Correct. ${letter}` : `Incorrect. You entered ${letter}`);
       } else {
         setLearnCorrect(null);
         setLearnMessage(`Explore mode — detected ${letter}.`);
@@ -279,8 +364,14 @@ export default function App() {
     }
   }
 
-  function handleBackspace() { setText(p => p.slice(0, -1)); if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Backspace"); }
-  function handleClear() { setText(""); setDetectedLetter(""); resetVisuals(); if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Cleared"); }
+  function handleBackspace() {
+    setText(p => p.slice(0, -1));
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Backspace");
+  }
+  function handleClear() {
+    setText(""); setDetectedLetter(""); resetVisuals();
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Cleared");
+  }
 
   function handleSaveNote() {
     if (!text.trim()) return;
@@ -293,7 +384,10 @@ export default function App() {
 
   function exportNoteAsTxt() {
     if (!text.trim()) return;
-    const a = Object.assign(document.createElement("a"), { href:URL.createObjectURL(new Blob([text],{type:"text/plain"})), download:"braille-note.txt" });
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob([text], { type:"text/plain" })),
+      download: "braille-note.txt",
+    });
     a.click(); URL.revokeObjectURL(a.href);
     if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Note exported");
   }
@@ -306,6 +400,7 @@ export default function App() {
     if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Note updated");
   }
   function cancelEditing() { setEditingId(null); setEditText(""); }
+
   function deleteNote(id) {
     const note = notes.find(n => n.id === id);
     if (note) setDeletedNotes(p => [{ ...note, deletedAt:new Date().toLocaleString() }, ...p]);
@@ -323,7 +418,10 @@ export default function App() {
     setDeletedNotes(p => p.filter(n => n.id !== id));
     if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Note permanently deleted");
   }
-  function emptyTrash() { setDeletedNotes([]); if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Trash emptied"); }
+  function emptyTrash() {
+    setDeletedNotes([]);
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Trash emptied");
+  }
 
   function nextTargetLetter() {
     const next = LETTERS[(LETTERS.indexOf(targetLetter) + 1) % LETTERS.length];
@@ -347,8 +445,8 @@ export default function App() {
 
   const troubleshootItems = useMemo(() => {
     const items = [];
-    if (!connected) items.push({ kind:"err", icon:"🔴", text:"Hardware not connected — make sure your ESP32 is powered and the server (ws://localhost:5001) is running." });
-    else            items.push({ kind:"ok",  icon:"🟢", text:"Hardware connected successfully." });
+    if (!connected) items.push({ kind:"err",  icon:"🔴", text:"Hardware not connected — make sure your ESP32 is powered and the server (ws://192.168.1.25:5001) is running." });
+    else            items.push({ kind:"ok",   icon:"🟢", text:"Hardware connected successfully." });
 
     if (connected && timeSincePacket !== null && timeSincePacket > 5)
       items.push({ kind:"warn", icon:"🟡", text:`No sensor data received for ${timeSincePacket}s — the ESP32 may have stopped sending. Try pressing a sensor.` });
@@ -406,10 +504,10 @@ export default function App() {
                         value={settings.textSize} onChange={e => setSettingValue("textSize", Number(e.target.value))} />
                     </div>
                     {[
-                      ["audioEnabled","Audio"],
-                      ["spokenConfirmations","Spoken Confirmations"],
-                      ["darkMode","Dark Mode"],
-                      ["highContrast","High Contrast"],
+                      ["audioEnabled",         "Audio"],
+                      ["spokenConfirmations",   "Spoken Confirmations"],
+                      ["darkMode",              "Dark Mode"],
+                      ["highContrast",          "High Contrast"],
                     ].map(([key, label]) => (
                       <div key={key} className="setting-row checkbox-row">
                         <label htmlFor={key}>{label}</label>
@@ -739,11 +837,10 @@ export default function App() {
                 <p className="support-text">Track your note entries and practice attempts.</p>
 
                 <div className="history-sections">
-                  {/* Stats bar */}
                   {history.practice.length > 0 && (
                     <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
                       {[
-                        [history.practice.filter(p=>p.type==="correct").length, "Correct"],
+                        [history.practice.filter(p=>p.type==="correct").length,   "Correct"],
                         [history.practice.filter(p=>p.type==="incorrect").length, "Incorrect"],
                         [Math.round(history.practice.filter(p=>p.type==="correct").length/Math.max(history.practice.length,1)*100)+"%", "Accuracy"],
                         [`${completedLetters.length}/26`, "Mastered"],
@@ -757,9 +854,7 @@ export default function App() {
                   )}
 
                   <div className="history-section">
-                    <div className="history-section-header">
-                      <NotesIcon /> Recent Notes
-                    </div>
+                    <div className="history-section-header"><NotesIcon /> Recent Notes</div>
                     {history.notes.length === 0 ? (
                       <p className="history-empty">No notes saved yet.</p>
                     ) : (
@@ -776,9 +871,7 @@ export default function App() {
                   </div>
 
                   <div className="history-section">
-                    <div className="history-section-header">
-                      <LearnIcon /> Practice Attempts
-                    </div>
+                    <div className="history-section-header"><LearnIcon /> Practice Attempts</div>
                     {history.practice.length === 0 ? (
                       <p className="history-empty">No practice attempts yet.</p>
                     ) : (
@@ -818,7 +911,6 @@ export default function App() {
                   </p>
                 </section>
 
-                {/* Troubleshoot section — prominent for basic users */}
                 <section className="section-card">
                   <h2 style={{marginBottom:14}}>Status &amp; Troubleshooting</h2>
                   <ul className="trouble-list">
@@ -831,19 +923,18 @@ export default function App() {
                   </ul>
                 </section>
 
-                {/* Live finger pressure */}
                 <section className="section-card">
                   <h2 style={{marginBottom:14}}>Live Sensor Readings</h2>
                   <div className="sensor-grid">
                     {FINGER_NAMES.map((name, i) => {
-                      const pct = Math.round(sensorValues[i] * 100);
+                      const pct    = Math.round(sensorValues[i] * 100);
                       const active = pct > 10;
                       return (
                         <div key={i} className={`sensor-finger-card ${active?"active":""}`}>
                           <div className="sensor-finger-label">{i < 3 ? "Left Hand" : "Right Hand"}</div>
                           <div className="sensor-finger-name">{name.split("-")[1]}</div>
                           <div className="sensor-bar-track">
-                            <div className="sensor-bar-fill" style={{width:`${pct}%`, background: FINGER_COLORS[i]}} />
+                            <div className="sensor-bar-fill" style={{width:`${pct}%`, background:FINGER_COLORS[i]}} />
                           </div>
                           <div className="sensor-value">{pct}%</div>
                         </div>
@@ -852,7 +943,6 @@ export default function App() {
                   </div>
                 </section>
 
-                {/* Chart */}
                 <section className="section-card">
                   <h2 style={{marginBottom:14}}>Input Over Time</h2>
                   <div className="sensor-chart-wrap">
@@ -868,7 +958,6 @@ export default function App() {
                   </div>
                 </section>
 
-                {/* Advanced section */}
                 <section className="section-card">
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                     <h2 style={{margin:0}}>Advanced</h2>
@@ -900,7 +989,7 @@ export default function App() {
                         </div>
                         <div className="diag-row">
                           <span className="diag-label">Server address</span>
-                          <span className="diag-value">ws://localhost:5001</span>
+                          <span className="diag-value">ws://192.168.1.25:5001</span>
                         </div>
                       </div>
 
@@ -945,7 +1034,7 @@ export default function App() {
                   <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
                     {[
                       ["🧤","Hardware","6 FSR sensors, ESP32, lightweight gloves"],
-                      ["📡","Connection","WebSocket at ws://localhost:5001"],
+                      ["📡","Connection","WebSocket at ws://192.168.1.25:5001"],
                       ["🔊","Output","Text display + speech synthesis"],
                     ].map(([icon,label,desc]) => (
                       <div key={label} className="stat-box" style={{alignItems:"flex-start",gap:6,padding:"16px"}}>
@@ -961,12 +1050,12 @@ export default function App() {
                   <h2 style={{marginBottom:14}}>Meet the Team</h2>
                   <div className="team-grid">
                     {[
-                      { name:"Zubiyaa Khan",     role:"CS Lead",                bio:"Senior in CS, passionate about hardware/software integration and accessibility technology." },
+                      { name:"Zubiyaa Khan",      role:"CS Lead",                bio:"Senior in CS, passionate about hardware/software integration and accessibility technology." },
                       { name:"Presley Churchman", role:"Electrical Engineering", bio:"Freshman EE focused on sensor circuits and the firmware/software overlap. UT Dallas tennis team." },
-                      { name:"Kasish Jain",       role:"Computer Engineering",  bio:"Sophomore CE interested in embedded systems and biomedical applications." },
-                      { name:"Jayne McGovern",    role:"Mechanical Engineering", bio:"Freshman ME focused on sensors, ergonomics, and cross-discipline coordination." },
-                      { name:"Paris Ngo",         role:"Mechanical Engineering", bio:"Junior ME with interests in medical devices and automotive design." },
-                      { name:"Melissa Manandhar", role:"Biomedical Engineering", bio:"Freshman BME focused on accessible medical devices and human-technology integration." },
+                      { name:"Kasish Jain",        role:"Computer Engineering",  bio:"Sophomore CE interested in embedded systems and biomedical applications." },
+                      { name:"Jayne McGovern",     role:"Mechanical Engineering", bio:"Freshman ME focused on sensors, ergonomics, and cross-discipline coordination." },
+                      { name:"Paris Ngo",          role:"Mechanical Engineering", bio:"Junior ME with interests in medical devices and automotive design." },
+                      { name:"Melissa Manandhar",  role:"Biomedical Engineering", bio:"Freshman BME focused on accessible medical devices and human-technology integration." },
                     ].map(m => (
                       <div key={m.name} className="team-card">
                         <div className="team-name">{m.name}</div>
@@ -1006,7 +1095,6 @@ function SensorChart({ history }) {
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="chart-svg" preserveAspectRatio="none">
-      {/* Grid lines */}
       {[0.25,0.5,0.75,1].map(y => (
         <line key={y} x1={PAD} y1={H - y*(H-PAD*2) - PAD} x2={W-PAD} y2={H - y*(H-PAD*2) - PAD}
           stroke="var(--border-col)" strokeWidth="1" opacity="0.5" />
@@ -1055,9 +1143,9 @@ function BrailleHandsPreview({ brailleDots, fingers }) {
         </div>
         <div className="hands-body">
           {[
-            { side:"left",  cols:["Thumb","Middle","Ring"],  vals:[fingers.left.thumb, fingers.left.middle, fingers.left.ring]  },
+            { side:"left",  cols:["Thumb","Middle","Ring"], vals:[fingers.left.thumb,  fingers.left.middle,  fingers.left.ring]  },
             null,
-            { side:"right", cols:["Thumb","Middle","Ring"],  vals:[fingers.right.thumb,fingers.right.middle,fingers.right.ring] },
+            { side:"right", cols:["Thumb","Middle","Ring"], vals:[fingers.right.thumb, fingers.right.middle, fingers.right.ring] },
           ].map((col, i) => col === null
             ? <div key="div" className="hand-divider" />
             : (
