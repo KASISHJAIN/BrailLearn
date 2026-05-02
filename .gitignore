@@ -21,3 +21,13 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+secrets.h 
+esp32/src/secrets.h 
+
+
+frontend/
+server/
+package.json
+package-lock.json
+node_modules/
+esp32 previous code/
