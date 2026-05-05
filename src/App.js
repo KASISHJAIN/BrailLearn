@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import "./App.css";
+import TypingGame from "./TypingGame";
 
 /* ─── BRAILLE DATA ─────────────────────────────────────── */
 const LETTER_PATTERNS = {
@@ -113,6 +114,26 @@ export default function App() {
   const [showRefs,          setShowRefs]          = useState(false);
   const HISTORY_LEN = 60;
 
+<<<<<<< HEAD
+=======
+  // ── WEBSOCKET REFS ────────────────────────────────────────
+  const wsRef        = useRef(null); // Holds the live WebSocket instance
+  const reconnectRef = useRef(null); // Holds the setTimeout handle for reconnect
+
+  // ── DEDUP REF ─────────────────────────────────────────────
+  // Tracks the last letter received and when, to drop duplicates.
+  // WHY: React 18 StrictMode runs every useEffect TWICE in development
+  // (mount → fake unmount → mount again). connect() runs twice → two
+  // WebSocket objects open at the same time. Both receive the server
+  // broadcast, so onmessage fires twice → same letter appended twice.
+  // A ref is used instead of state because refs persist across re-renders
+  // without causing re-renders, and we need to write to it synchronously
+  // inside onmessage before the next message could arrive.
+  const lastMsgRef = useRef({ letter: "", time: 0 });
+  const DEDUP_MS   = 500; // Drop duplicate letters arriving within this window (ms)
+
+  /* ─ nav ─ */
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
   const navItems = useMemo(() => [
     { label:"Home",        icon:<HomeIcon /> },
     { label:"Learn",       icon:<LearnIcon /> },
@@ -133,11 +154,19 @@ export default function App() {
     setHistory(load("braille-history", { notes:[], practice:[], sessions:[] }));
   }, []);
 
+<<<<<<< HEAD
   useEffect(() => { localStorage.setItem("braille-notes",          JSON.stringify(notes)); },          [notes]);
   useEffect(() => { localStorage.setItem("braille-deleted-notes",  JSON.stringify(deletedNotes)); },   [deletedNotes]);
   useEffect(() => { localStorage.setItem("braille-settings",       JSON.stringify(settings)); },       [settings]);
   useEffect(() => { localStorage.setItem("braille-learn-progress", JSON.stringify({completedLetters})); }, [completedLetters]);
   useEffect(() => { localStorage.setItem("braille-history",        JSON.stringify(history)); },        [history]);
+=======
+  useEffect(() => { localStorage.setItem("braille-notes",         JSON.stringify(notes));            }, [notes]);
+  useEffect(() => { localStorage.setItem("braille-deleted-notes", JSON.stringify(deletedNotes));     }, [deletedNotes]);
+  useEffect(() => { localStorage.setItem("braille-settings",      JSON.stringify(settings));         }, [settings]);
+  useEffect(() => { localStorage.setItem("braille-learn-progress",JSON.stringify({ completedLetters })); }, [completedLetters]);
+  useEffect(() => { localStorage.setItem("braille-history",       JSON.stringify(history));          }, [history]);
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
 
   /* ─── outside click — close settings ──────────────────── */
   useEffect(() => {
@@ -163,6 +192,7 @@ export default function App() {
     return () => document.removeEventListener("keydown", fn);
   }, [showSettings]);
 
+<<<<<<< HEAD
   /* ─── keyboard nav Alt+1-6 ─────────────────────────────── */
   useEffect(() => {
     const TABS = navItems.map(n => n.label);
@@ -197,10 +227,78 @@ export default function App() {
           if (d.type==="sensor"&&Array.isArray(d.values)) {
             const vals=d.values.slice(0,6);
             setSensorValues(vals); setSensorAdcValues(d.adc||vals.map(v=>Math.round(v*40.95)));
+=======
+  /* ─── WebSocket — auto-connects, auto-reconnects, dedup ─── */
+  // learnRef keeps the latest state values accessible inside the WS
+  // callback closure without the effect needing to re-run on every change.
+  const learnRef = useRef({ learnMode, targetLetter, completedLetters, activeTab, settings });
+  useEffect(() => {
+    learnRef.current = { learnMode, targetLetter, completedLetters, activeTab, settings };
+  }, [learnMode, targetLetter, completedLetters, activeTab, settings]);
+
+  useEffect(() => {
+    const pingTimes   = {};
+    let   pingCounter = 0;
+    let   pingId      = null;
+
+    const connect = () => {
+      // ── Open connection to the Node.js bridge server on the LAN ──
+      const ws = new WebSocket(`ws://${window.location.hostname}:5001`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setConnected(true);
+        // Identify this client as a frontend (server logs it)
+        ws.send(JSON.stringify({ client: "frontend" }));
+
+        // Start latency pings every 2 s
+        pingId = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            const id = ++pingCounter;
+            pingTimes[id] = performance.now();
+            ws.send(JSON.stringify({ type: "ping", id }));
+          }
+        }, 2000);
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        clearInterval(pingId);
+        // Schedule reconnect — prevents connection dropping silently
+        reconnectRef.current = setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        // On any error, close triggers onclose which schedules reconnect
+        ws.close();
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+
+          // ── Latency pong ──
+          if (data.type === "pong" && pingTimes[data.id]) {
+            setWsLatency(Math.round(performance.now() - pingTimes[data.id]));
+            delete pingTimes[data.id];
+            return;
+          }
+
+          // ── Connection status message ──
+          if (data.type === "status") { setConnected(!!data.connected); return; }
+
+          // ── Live sensor readings ──
+          if (data.type === "sensor" && Array.isArray(data.values)) {
+            const vals    = data.values.slice(0, 6);
+            const adcVals = data.adc || vals.map(v => Math.round(v * 40.95));
+            setSensorValues(vals);
+            setSensorAdcValues(adcVals);
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
             setLastPacketTime(Date.now());
             setSensorHistory(prev=>prev.map((h,i)=>{const n=[...h,vals[i]??0];return n.length>HISTORY_LEN?n.slice(-HISTORY_LEN):n;}));
             return;
           }
+<<<<<<< HEAD
           if (d.type==="letter"&&d.letter) { handleIncomingLetter(String(d.letter).toUpperCase()); return; }
           if (d.type==="pattern"&&Array.isArray(d.pattern)&&d.pattern.length===6) { handleIncomingPattern(d.pattern); return; }
         } catch(err) { console.error("ws",err); }
@@ -209,8 +307,72 @@ export default function App() {
       ws.addEventListener("error", ()=>{ setConnected(false); clearInterval(ping.id); });
     } catch { setConnected(false); }
     return () => { clearInterval(ping.id); if(ws) try{ws.close();}catch{} };
+=======
+
+          // ── Incoming letter ──
+          if (data.type === "letter" && data.letter) {
+            const letter = String(data.letter).toUpperCase();
+            const now    = Date.now();
+
+            // DEDUP: drop if the same letter arrives within DEDUP_MS.
+            // This neutralises React StrictMode double-mount, multiple open
+            // tabs, and any duplicate that slips past the server-side dedup.
+            if (
+              letter === lastMsgRef.current.letter &&
+              now - lastMsgRef.current.time < DEDUP_MS
+            ) {
+              console.log("⚠️ Duplicate letter dropped:", letter);
+              return;
+            }
+            // Update dedup ref BEFORE setState to prevent race conditions
+            lastMsgRef.current = { letter, time: now };
+
+            handleIncomingLetter(letter);
+            return;
+          }
+
+          // ── Legacy gesture message type ──
+          if (data.type === "gesture" && data.letter) {
+            const letter = String(data.letter).toUpperCase();
+            const now    = Date.now();
+
+            if (
+              letter === lastMsgRef.current.letter &&
+              now - lastMsgRef.current.time < DEDUP_MS
+            ) {
+              console.log("⚠️ Duplicate letter dropped:", letter);
+              return;
+            }
+            lastMsgRef.current = { letter, time: now };
+
+            handleIncomingLetter(letter);
+            return;
+          }
+
+          // ── Incoming raw pattern ──
+          if (data.type === "pattern" && Array.isArray(data.pattern) && data.pattern.length === 6) {
+            handleIncomingPattern(data.pattern);
+            return;
+          }
+
+        } catch (err) {
+          console.error("Bad WS message:", err, evt.data);
+        }
+      };
+    };
+
+    connect(); // Initial connection on mount
+
+    // Cleanup: cancel reconnect timer and close socket on unmount
+    // (also runs on StrictMode fake-unmount)
+    return () => {
+      clearTimeout(reconnectRef.current);
+      clearInterval(pingId);
+      wsRef.current?.close();
+    };
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
   // eslint-disable-next-line
-  }, []);
+  }, []); // Empty deps — runs once on mount (twice in StrictMode dev)
 
   /* ─── derived ──────────────────────────────────────────── */
   const { darkMode, textSize, audioEnabled, audioSpeed } = settings;
@@ -218,10 +380,17 @@ export default function App() {
   const filteredNotes = useMemo(() => {
     let r = [...notes];
     if (noteSearch) r = r.filter(n => n.text.toLowerCase().includes(noteSearch.toLowerCase()));
+<<<<<<< HEAD
     if (noteSort==="oldest")        r.sort((a,b)=>a.id-b.id);
     else if (noteSort==="longest")  r.sort((a,b)=>b.text.length-a.text.length);
     else if (noteSort==="shortest") r.sort((a,b)=>a.text.length-b.text.length);
     else r.sort((a,b)=>b.id-a.id);
+=======
+    if (noteSort === "oldest")        r.sort((a,b) => a.id - b.id);
+    else if (noteSort === "longest")  r.sort((a,b) => b.text.length - a.text.length);
+    else if (noteSort === "shortest") r.sort((a,b) => a.text.length - b.text.length);
+    else                              r.sort((a,b) => b.id - a.id);
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
     return r;
   }, [notes, noteSearch, noteSort]);
 
@@ -283,10 +452,21 @@ export default function App() {
       if (learnMode==="practice") {
         const ok = letter===targetLetter;
         setLearnCorrect(ok);
+<<<<<<< HEAD
         setLearnMessage(ok ? `Correct! You entered ${letter}.` : `Not quite. You entered ${letter}, but the target is ${targetLetter}.`);
         if (ok && !completedLetters.includes(letter)) setCompletedLetters(p=>[...p,letter]);
         setHistory(p=>({...p,practice:[{type:ok?"correct":"incorrect",letter,target:targetLetter,createdAt:new Date().toLocaleString()},...p.practice].slice(0,100)}));
         if (settings.audioEnabled && settings.spokenConfirmations) speakText(ok?`Correct. ${letter}`:`Incorrect. ${letter}`, settings.audioSpeed);
+=======
+        setLearnMessage(ok ? `Correct! You entered ${letter}.` : `Not quite — you entered ${letter}, target is ${targetLetter}.`);
+        if (ok && !completedLetters.includes(letter)) setCompletedLetters(p => [...p, letter]);
+        setHistory(p => ({
+          ...p,
+          practice: [{ type: ok?"correct":"incorrect", letter, target:targetLetter, createdAt:new Date().toLocaleString() }, ...p.practice].slice(0, 100),
+        }));
+        if (settings.spokenConfirmations && settings.audioEnabled)
+          setLastSpokenMessage(ok ? `Correct. ${letter}` : `Incorrect. You entered ${letter}`);
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
       } else {
         setLearnCorrect(null);
         setLearnMessage(`Detected: ${letter}`);
@@ -295,9 +475,20 @@ export default function App() {
     }
   }
 
+<<<<<<< HEAD
   /* ─── home actions ─────────────────────────────────────── */
   function handleBackspace() { setText(p=>p.slice(0,-1)); say("Backspace"); }
   function handleClear()     { setText(""); setDetectedLetter(""); resetVisuals(); say("Cleared"); }
+=======
+  function handleBackspace() {
+    setText(p => p.slice(0, -1));
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Backspace");
+  }
+  function handleClear() {
+    setText(""); setDetectedLetter(""); resetVisuals();
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Cleared");
+  }
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
 
   function handleSaveNote() {
     if (!text.trim()) return;
@@ -315,8 +506,17 @@ export default function App() {
 
   function exportNoteAsTxt() {
     if (!text.trim()) return;
+<<<<<<< HEAD
     const a = Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob([text],{type:"text/plain"})),download:"braille-note.txt"});
     a.click(); URL.revokeObjectURL(a.href); say("Note exported");
+=======
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob([text], { type:"text/plain" })),
+      download: "braille-note.txt",
+    });
+    a.click(); URL.revokeObjectURL(a.href);
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Note exported");
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
   }
 
   function loadNoteIntoEditor(note) {
@@ -330,7 +530,12 @@ export default function App() {
     setNotes(p=>p.map(n=>n.id===editingId?{...n,text:editText.trim()}:n));
     setEditingId(null); setEditText(""); say("Note updated");
   }
+<<<<<<< HEAD
   function cancelEditing()   { setEditingId(null); setEditText(""); }
+=======
+  function cancelEditing() { setEditingId(null); setEditText(""); }
+
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
   function deleteNote(id) {
     const note = notes.find(n=>n.id===id);
     if (note) setDeletedNotes(p=>[{...note,deletedAt:new Date().toLocaleString()},...p]);
@@ -343,8 +548,19 @@ export default function App() {
     if (note) { const {deletedAt,...rest}=note; setNotes(p=>[rest,...p]); }
     setDeletedNotes(p=>p.filter(n=>n.id!==id)); say("Note restored");
   }
+<<<<<<< HEAD
   function permanentlyDeleteNote(id) { setDeletedNotes(p=>p.filter(n=>n.id!==id)); say("Note deleted"); }
   function emptyTrash()              { setDeletedNotes([]); say("Trash emptied"); }
+=======
+  function permanentlyDeleteNote(id) {
+    setDeletedNotes(p => p.filter(n => n.id !== id));
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Note permanently deleted");
+  }
+  function emptyTrash() {
+    setDeletedNotes([]);
+    if (settings.spokenConfirmations && audioEnabled) setLastSpokenMessage("Trash emptied");
+  }
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
 
   /* ─── learn actions ────────────────────────────────────── */
   function nextTargetLetter() {
@@ -370,10 +586,17 @@ export default function App() {
     setShowSettings(true);
   }, []);
 
+<<<<<<< HEAD
   const closeSettings = useCallback(() => {
     setShowSettings(false);
     settingsTriggerRef.current?.focus();
   }, []);
+=======
+  const troubleshootItems = useMemo(() => {
+    const items = [];
+    if (!connected) items.push({ kind:"err",  icon:"🔴", text:"Hardware not connected — make sure your ESP32 is powered and the server (ws://192.168.1.25:5001) is running." });
+    else            items.push({ kind:"ok",   icon:"🟢", text:"Hardware connected successfully." });
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
 
   /* ─── RENDER ──────────────────────────────────────────── */
   return (
@@ -441,11 +664,27 @@ export default function App() {
                         onChange={e=>setSettingValue("textSize",Number(e.target.value))}
                       />
                     </div>
+<<<<<<< HEAD
 
                     <div className="setting-row checkbox-row">
                       <div>
                         <label htmlFor="audioEnabled" style={{display:"block",fontWeight:700}}>Audio Playback</label>
                         <span className="setting-sub">Reads note text aloud when you press Play</span>
+=======
+                    {[
+                      ["audioEnabled",         "Audio"],
+                      ["spokenConfirmations",   "Spoken Confirmations"],
+                      ["darkMode",              "Dark Mode"],
+                      ["highContrast",          "High Contrast"],
+                    ].map(([key, label]) => (
+                      <div key={key} className="setting-row checkbox-row">
+                        <label htmlFor={key}>{label}</label>
+                        <label className="toggle-switch">
+                          <input id={key} type="checkbox" checked={settings[key]}
+                            onChange={e => setSettingValue(key, e.target.checked)} />
+                          <span className="slider" />
+                        </label>
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                       </div>
                       <label className="toggle-switch">
                         <input id="audioEnabled" type="checkbox" checked={settings.audioEnabled}
@@ -807,6 +1046,7 @@ export default function App() {
                   {history.practice.length > 0 && (
                     <div style={{display:"flex",gap:14,flexWrap:"wrap"}} role="list" aria-label="Practice statistics">
                       {[
+<<<<<<< HEAD
                         [history.practice.filter(p=>p.type==="correct").length,"Correct"],
                         [history.practice.filter(p=>p.type==="incorrect").length,"Incorrect"],
                         [Math.round(history.practice.filter(p=>p.type==="correct").length/Math.max(history.practice.length,1)*100)+"%","Accuracy"],
@@ -815,15 +1055,36 @@ export default function App() {
                         <div key={lab} className="stat-box" style={{flex:"1 1 90px"}} role="listitem">
                           <span className="stat-value" aria-label={`${lab}: ${val}`}>{val}</span>
                           <span className="stat-label" aria-hidden="true">{lab}</span>
+=======
+                        [history.practice.filter(p=>p.type==="correct").length,   "Correct"],
+                        [history.practice.filter(p=>p.type==="incorrect").length, "Incorrect"],
+                        [Math.round(history.practice.filter(p=>p.type==="correct").length/Math.max(history.practice.length,1)*100)+"%", "Accuracy"],
+                        [`${completedLetters.length}/26`, "Mastered"],
+                      ].map(([val,lab]) => (
+                        <div key={lab} className="stat-box" style={{flex:"1 1 100px"}}>
+                          <span className="stat-value">{val}</span>
+                          <span className="stat-label">{lab}</span>
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                         </div>
                       ))}
                     </div>
                   )}
+<<<<<<< HEAD
                   <div className="history-section" aria-labelledby="recent-notes-heading">
                     <div className="history-section-header" id="recent-notes-heading"><NotesIcon /> Recent Notes</div>
                     {history.notes.length===0 ? <p className="history-empty">No notes saved yet.</p> : (
                       <ul className="history-list" aria-label="Recent notes history">
                         {history.notes.slice(0,10).map((item,i)=>(
+=======
+
+                  <div className="history-section">
+                    <div className="history-section-header"><NotesIcon /> Recent Notes</div>
+                    {history.notes.length === 0 ? (
+                      <p className="history-empty">No notes saved yet.</p>
+                    ) : (
+                      <ul className="history-list">
+                        {history.notes.slice(0,10).map((item,i) => (
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                           <li key={i} className="history-item">
                             <span className="history-icon note-hi" aria-hidden="true">N</span>
                             <span className="history-text">{item.text}</span>
@@ -833,11 +1094,22 @@ export default function App() {
                       </ul>
                     )}
                   </div>
+<<<<<<< HEAD
                   <div className="history-section" aria-labelledby="practice-history-heading">
                     <div className="history-section-header" id="practice-history-heading"><LearnIcon /> Practice Attempts</div>
                     {history.practice.length===0 ? <p className="history-empty">No practice attempts yet.</p> : (
                       <ul className="history-list" aria-label="Practice history">
                         {history.practice.slice(0,10).map((item,i)=>(
+=======
+
+                  <div className="history-section">
+                    <div className="history-section-header"><LearnIcon /> Practice Attempts</div>
+                    {history.practice.length === 0 ? (
+                      <p className="history-empty">No practice attempts yet.</p>
+                    ) : (
+                      <ul className="history-list">
+                        {history.practice.slice(0,10).map((item,i) => (
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                           <li key={i} className={`history-item ${item.type}`}>
                             <span className={`history-icon ${item.type==="correct"?"correct-hi":"incorrect-hi"}`} aria-hidden="true">
                               {item.type==="correct"?"+":"x"}
@@ -875,10 +1147,17 @@ export default function App() {
                   <p className="support-text">Live readings from your six fingertip sensors. Check connection status and troubleshoot issues here.</p>
                 </section>
 
+<<<<<<< HEAD
                 <section className="section-card" aria-labelledby="status-heading">
                   <h2 id="status-heading" style={{marginBottom:14}}>Status</h2>
                   <ul className="trouble-list" aria-label="Connection status">
                     {troubleshootItems.map((item,i)=>(
+=======
+                <section className="section-card">
+                  <h2 style={{marginBottom:14}}>Status &amp; Troubleshooting</h2>
+                  <ul className="trouble-list">
+                    {troubleshootItems.map((item, i) => (
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                       <li key={i} className={`trouble-item ${item.kind==="ok"?"ok-item":item.kind==="warn"?"warn-item":"err-item"}`}>
                         <span className={`trouble-badge ${item.kind}`}>{item.label}</span>
                         <span>{item.text}</span>
@@ -887,17 +1166,31 @@ export default function App() {
                   </ul>
                 </section>
 
+<<<<<<< HEAD
                 <section className="section-card" aria-labelledby="live-sensor-heading">
                   <h2 id="live-sensor-heading" style={{marginBottom:14}}>Live Sensor Readings</h2>
                   <div className="sensor-grid" role="list" aria-label="Finger sensor readings">
                     {FINGER_NAMES.map((name,i)=>{
                       const pct=Math.round(sensorValues[i]*100);
+=======
+                <section className="section-card">
+                  <h2 style={{marginBottom:14}}>Live Sensor Readings</h2>
+                  <div className="sensor-grid">
+                    {FINGER_NAMES.map((name, i) => {
+                      const pct    = Math.round(sensorValues[i] * 100);
+                      const active = pct > 10;
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                       return (
                         <div key={i} className={`sensor-finger-card ${pct>10?"active":""}`} role="listitem" aria-label={`${name}: ${pct}%`}>
                           <div className="sensor-finger-label">{i<3?"Left Hand":"Right Hand"}</div>
                           <div className="sensor-finger-name">{name.split("-")[1]}</div>
+<<<<<<< HEAD
                           <div className="sensor-bar-track" role="presentation">
                             <div className="sensor-bar-fill" style={{width:`${pct}%`,background:FINGER_COLORS[i]}} />
+=======
+                          <div className="sensor-bar-track">
+                            <div className="sensor-bar-fill" style={{width:`${pct}%`, background:FINGER_COLORS[i]}} />
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                           </div>
                           <div className="sensor-value" aria-hidden="true">{pct}<span className="sensor-pct">%</span></div>
                         </div>
@@ -906,8 +1199,13 @@ export default function App() {
                   </div>
                 </section>
 
+<<<<<<< HEAD
                 <section className="section-card" aria-labelledby="chart-heading">
                   <h2 id="chart-heading" style={{marginBottom:14}}>Input Over Time</h2>
+=======
+                <section className="section-card">
+                  <h2 style={{marginBottom:14}}>Input Over Time</h2>
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                   <div className="sensor-chart-wrap">
                     <SensorChart history={sensorHistory} />
                   </div>
@@ -935,6 +1233,7 @@ export default function App() {
                     <div id="adv-section" className="adv-section">
                       <span className="adv-label">Connection Info</span>
                       <div className="diag-grid">
+<<<<<<< HEAD
                         {[
                           ["WebSocket",   connected?"Connected":"Disconnected", connected?"ok":"err"],
                           ["Latency",     wsLatency!==null?`${wsLatency} ms`:"no data", wsLatency===null?"warn":wsLatency<50?"ok":"warn"],
@@ -946,6 +1245,28 @@ export default function App() {
                             <span className={`diag-value ${cls}`}>{val}</span>
                           </div>
                         ))}
+=======
+                        <div className="diag-row">
+                          <span className="diag-label">WebSocket</span>
+                          <span className={`diag-value ${connected?"ok":"err"}`}>{connected?"Connected":"Disconnected"}</span>
+                        </div>
+                        <div className="diag-row">
+                          <span className="diag-label">Round-trip latency</span>
+                          <span className={`diag-value ${wsLatency===null?"warn":wsLatency<50?"ok":"warn"}`}>
+                            {wsLatency !== null ? `${wsLatency} ms` : "—"}
+                          </span>
+                        </div>
+                        <div className="diag-row">
+                          <span className="diag-label">Last packet</span>
+                          <span className={`diag-value ${timeSincePacket===null?"warn":timeSincePacket<5?"ok":"warn"}`}>
+                            {timeSincePacket !== null ? `${timeSincePacket}s ago` : "No data"}
+                          </span>
+                        </div>
+                        <div className="diag-row">
+                          <span className="diag-label">Server address</span>
+                          <span className="diag-value">ws://192.168.1.25:5001</span>
+                        </div>
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                       </div>
                       <span className="adv-label" style={{display:"block",marginTop:16}}>Raw ADC Values (0 to 4095)</span>
                       <div className="diag-grid">
@@ -986,11 +1307,20 @@ export default function App() {
                   </p>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}} role="list" aria-label="Technical specifications">
                     {[
+<<<<<<< HEAD
                       ["Hardware",   "6 FSR sensors, ESP32 microcontroller, lightweight gloves"],
                       ["Connection", "WebSocket streaming at ws://localhost:5001"],
                       ["Output",     "Text display and speech synthesis for audio feedback"],
                     ].map(([label,desc])=>(
                       <div key={label} className="stat-box" style={{alignItems:"flex-start",gap:6,padding:16}} role="listitem">
+=======
+                      ["🧤","Hardware","6 FSR sensors, ESP32, lightweight gloves"],
+                      ["📡","Connection","WebSocket at ws://192.168.1.25:5001"],
+                      ["🔊","Output","Text display + speech synthesis"],
+                    ].map(([icon,label,desc]) => (
+                      <div key={label} className="stat-box" style={{alignItems:"flex-start",gap:6,padding:"16px"}}>
+                        <span style={{fontSize:"1.5rem"}}>{icon}</span>
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                         <span className="stat-label">{label}</span>
                         <span style={{fontSize:".9rem",lineHeight:1.5}}>{desc}</span>
                       </div>
@@ -1002,6 +1332,7 @@ export default function App() {
                   <h2 id="team-heading" style={{marginBottom:14}}>Meet the Team</h2>
                   <div className="team-grid">
                     {[
+<<<<<<< HEAD
                       {name:"Zubiyaa Khan",      role:"Computer Science",      year:"Senior",   bio:"Passionate about hardware and software integration. Interested in accessibility technology and creating solutions that improve lives."},
                       {name:"Presley Churchman", role:"Electrical Engineering", year:"Freshman", bio:"Focused on sensor circuit implementation and the firmware and software overlap. Plays for the UT Dallas women's tennis team."},
                       {name:"Kasish Jain",       role:"Computer Engineering",  year:"Sophomore",bio:"Interested in embedded systems and biomedical applications. Explores how hardware and software intersect for human-centered design."},
@@ -1009,6 +1340,15 @@ export default function App() {
                       {name:"Paris Ngo",         role:"Mechanical Engineering", year:"Junior",   bio:"Primary interests in medical device development and automotive design. Developing technical and hands-on skills in both areas."},
                       {name:"Melissa Manandhar", role:"Biomedical Engineering", year:"Freshman", bio:"Interested in developing accessible medical devices and the integration of technology with the human body."},
                     ].map(m=>(
+=======
+                      { name:"Zubiyaa Khan",      role:"CS Lead",                bio:"Senior in CS, passionate about hardware/software integration and accessibility technology." },
+                      { name:"Presley Churchman", role:"Electrical Engineering", bio:"Freshman EE focused on sensor circuits and the firmware/software overlap. UT Dallas tennis team." },
+                      { name:"Kasish Jain",        role:"Computer Engineering",  bio:"Sophomore CE interested in embedded systems and biomedical applications." },
+                      { name:"Jayne McGovern",     role:"Mechanical Engineering", bio:"Freshman ME focused on sensors, ergonomics, and cross-discipline coordination." },
+                      { name:"Paris Ngo",          role:"Mechanical Engineering", bio:"Junior ME with interests in medical devices and automotive design." },
+                      { name:"Melissa Manandhar",  role:"Biomedical Engineering", bio:"Freshman BME focused on accessible medical devices and human-technology integration." },
+                    ].map(m => (
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
                       <div key={m.name} className="team-card">
                         <div className="team-avatar" aria-hidden="true">
                           {m.name.split(" ").map(w=>w[0]).join("")}
@@ -1058,12 +1398,19 @@ function SensorChart({ history }) {
   const W=800,H=160,PAD=10;
   const maxLen=history.reduce((m,h)=>Math.max(m,h.length),0);
   return (
+<<<<<<< HEAD
     <svg viewBox={`0 0 ${W} ${H}`} className="chart-svg" preserveAspectRatio="none"
       role="img" aria-label="Sensor input history chart">
       <title>Sensor input over time for all six fingers</title>
       {[0.25,0.5,0.75,1].map(y=>(
         <line key={y} x1={PAD} y1={H-y*(H-PAD*2)-PAD} x2={W-PAD} y2={H-y*(H-PAD*2)-PAD}
           stroke="var(--border-col)" strokeWidth="1" opacity="0.4"/>
+=======
+    <svg viewBox={`0 0 ${W} ${H}`} className="chart-svg" preserveAspectRatio="none">
+      {[0.25,0.5,0.75,1].map(y => (
+        <line key={y} x1={PAD} y1={H - y*(H-PAD*2) - PAD} x2={W-PAD} y2={H - y*(H-PAD*2) - PAD}
+          stroke="var(--border-col)" strokeWidth="1" opacity="0.5" />
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
       ))}
       {history.map((vals,fi)=>{
         if(vals.length<2) return null;
@@ -1104,12 +1451,21 @@ function BrailleHandsPreview({ brailleDots, fingers }) {
         </div>
         <div className="hands-body">
           {[
+<<<<<<< HEAD
             {side:"left", cols:["Thumb","Middle","Ring"],vals:[fingers.left.thumb,fingers.left.middle,fingers.left.ring]},
             null,
             {side:"right",cols:["Thumb","Middle","Ring"],vals:[fingers.right.thumb,fingers.right.middle,fingers.right.ring]},
           ].map((col,i)=>col===null
             ?<div key="div" className="hand-divider" aria-hidden="true"/>
             :(
+=======
+            { side:"left",  cols:["Thumb","Middle","Ring"], vals:[fingers.left.thumb,  fingers.left.middle,  fingers.left.ring]  },
+            null,
+            { side:"right", cols:["Thumb","Middle","Ring"], vals:[fingers.right.thumb, fingers.right.middle, fingers.right.ring] },
+          ].map((col, i) => col === null
+            ? <div key="div" className="hand-divider" />
+            : (
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
               <div key={col.side} className="hand-column">
                 <div className="finger-name-row" aria-hidden="true">{col.cols.map(c=><span key={c}>{c}</span>)}</div>
                 <div className="finger-icon-row">

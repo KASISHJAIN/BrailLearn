@@ -463,4 +463,8 @@ const GAME_CSS = `
   font-size: 14px;
 }
 .game-restart-btn:hover { background: #C0DD97; }
+<<<<<<< HEAD
 `;
+=======
+`;
+>>>>>>> fcfb7ff3cc26947f6733f4adc180ec3d05346db0
